@@ -1,0 +1,30 @@
+<resources>
+    <string name="app_name">Perchance</string>
+
+    <string name="home">Home</string>
+    <string name="refresh">Refresh</string>
+    <string name="share">Share page</string>
+    <string name="open_in_browser">Open in browser</string>
+    <string name="retry">Retry</string>
+    <string name="reload">Reload</string>
+    <string name="open">Open</string>
+    <string name="close_app">Close app</string>
+
+    <string name="error_title">Can\'t reach Perchance</string>
+    <string name="error_detail">Check your internet connection and try again.</string>
+    <string name="press_back_again">Press back again to exit</string>
+    <string name="no_app_for_link">No app on this device can open that link</string>
+    <string name="web_permission_denied">This app doesn\'t give web pages access to your camera or microphone</string>
+    <string name="renderer_gone_title">The page stopped responding</string>
+    <string name="renderer_gone_message">Perchance ran out of memory or its page engine crashed. Reload the page to continue.</string>
+
+    <string name="choose_file">Choose file</string>
+    <string name="download_started">Download started…</string>
+    <string name="download_failed">Download failed</string>
+    <string name="download_saved">Saved to Downloads: %1$s</string>
+
+    <string name="clear_data">Clear cookies and site data</string>
+    <string name="clear_data_message">This signs you out of Perchance and deletes generator saves stored on this device. It cannot be undone.</string>
+    <string name="clear_data_confirm">Clear</string>
+    <string name="clear_data_done">Cookies and site data cleared</string>
+</resources>
