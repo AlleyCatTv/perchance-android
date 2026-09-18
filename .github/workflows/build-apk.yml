@@ -25,7 +25,7 @@ env:
   # straight in here. Ignored once the source is committed in the repo.
   # Accepts: the project zip, a repository archive (.zip/.tar.gz, optionally
   # with a query string), or a git clone URL (https://github.com/you/repo.git).
-  PROJECT_ZIP_URL: "https://user.uploads.dev/file/89d076ab145af599f401ca806f05d05d.zip"
+  PROJECT_ZIP_URL: "https://user.uploads.dev/file/01c619bfe5768c86065d162aa9949502.zip"
 
 jobs:
   build:
@@ -43,7 +43,38 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK" ]; then
+            echo "::error::No Android SDK found on this runner at $SDK"
+            exit 1
+          fi
+          if ! command -v sdkmanager > /dev/null 2>&1; then
+            for candidate in "$SDK/cmdline-tools/latest/bin" "$SDK/cmdline-tools/bin" "$SDK/tools/bin"; do
+              if [ -x "$candidate/sdkmanager" ]; then
+                PATH="$candidate:$PATH"
+                break
+              fi
+            done
+          fi
+          if ! command -v sdkmanager > /dev/null 2>&1; then
+            echo "Installing the Android command-line tools"
+            curl -fsSL -o /tmp/cmdline-tools.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            rm -rf /tmp/cmdline-tools "$SDK/cmdline-tools/latest"
+            unzip -q -o /tmp/cmdline-tools.zip -d /tmp/cmdline-tools
+            mkdir -p "$SDK/cmdline-tools"
+            mv /tmp/cmdline-tools/cmdline-tools "$SDK/cmdline-tools/latest"
+            PATH="$SDK/cmdline-tools/latest/bin:$PATH"
+          fi
+          {
+            echo "ANDROID_SDK_ROOT=$SDK"
+            echo "ANDROID_HOME=$SDK"
+          } >> "$GITHUB_ENV"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          yes | sdkmanager --sdk_root="$SDK" --licenses > /dev/null || true
+          sdkmanager --sdk_root="$SDK" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager --sdk_root="$SDK" --list_installed | head -n 40 || true
 
       - name: Get the app source
         run: |
@@ -132,7 +163,9 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build
-        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
 
       - name: Collect APKs
         run: |
