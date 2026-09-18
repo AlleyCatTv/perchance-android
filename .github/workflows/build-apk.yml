@@ -1,0 +1,167 @@
+name: Build Perchance APK
+
+# Builds an installable APK on GitHub's runners. Nothing needs to be installed
+# on your own machine.
+#
+# Quick start: create an empty repository, add this file at
+# .github/workflows/build-apk.yml, and commit. That starts a build.
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      resync_source:
+        description: Re-download the app source before building
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  # Used only when this repo does not already contain the app source (no
+  # gradlew). Set a repository variable named PROJECT_ZIP_URL, or paste a URL
+  # straight in here. Ignored once the source is committed in the repo.
+  # Accepts: the project zip, a repository archive (.zip/.tar.gz, optionally
+  # with a query string), or a git clone URL (https://github.com/you/repo.git).
+  PROJECT_ZIP_URL: "https://user.uploads.dev/file/89d076ab145af599f401ca806f05d05d.zip"
+
+jobs:
+  build:
+    name: Assemble installable APKs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Get the app source
+        run: |
+          if [ ! -f ./gradlew ] || [ "${{ inputs.resync_source }}" = "true" ]; then
+            URL="$PROJECT_ZIP_URL"
+            if [ -z "$URL" ]; then
+              echo "::error::No app source in this repo and PROJECT_ZIP_URL is empty. Set it to the project zip, a repo archive link, or a git clone URL."
+              exit 1
+            fi
+            SRC=/tmp/perchance-src
+            rm -rf "$SRC"
+            mkdir -p "$SRC"
+            case "$URL" in
+              *.git|git@*|ssh://*|git+*)
+                echo "Cloning $URL"
+                git clone --depth 1 "${URL#git+}" "$SRC" ;;
+              *)
+                echo "Downloading $URL"
+                curl -fsSL -o /tmp/perchance-download "$URL"
+                if tar -tf /tmp/perchance-download > /dev/null 2>&1; then
+                  tar -xaf /tmp/perchance-download -C "$SRC"
+                else
+                  unzip -q -o /tmp/perchance-download -d "$SRC"
+                fi ;;
+            esac
+            # A repository archive (github.com/<user>/<repo>/archive/refs/heads/main.zip,
+            # codeload, GitLab/Bitbucket download links) wraps everything in one
+            # top-level "<repo>-<branch>/" folder - flatten it.
+            if [ ! -f "$SRC/gradlew" ]; then
+              INNER=""
+              for d in "$SRC"/*/; do INNER="${d%/}"; break; done
+              if [ -n "$INNER" ] && [ -f "$INNER/gradlew" ]; then
+                shopt -s dotglob
+                mv "$INNER"/* "$SRC"/
+                rmdir "$INNER"
+                shopt -u dotglob
+              fi
+            fi
+            if [ ! -f "$SRC/gradlew" ]; then
+              echo "::error::No app source (gradlew) found at $URL. Use the project zip, a repo archive link, or a git clone URL."
+              ls -la "$SRC"
+              exit 1
+            fi
+            # Never replace a signing key that already lives in this repo.
+            if [ -f signing/perchance.jks ]; then rm -rf "$SRC/signing"; fi
+            # Keep this workflow file instead of the copy shipped with the source.
+            mkdir -p "$SRC/.github/workflows"
+            cp .github/workflows/build-apk.yml "$SRC/.github/workflows/build-apk.yml"
+            rm -rf "$SRC/.git"
+            shopt -s dotglob
+            cp -R "$SRC"/. .
+            shopt -u dotglob
+          fi
+          chmod +x ./gradlew
+          ls -la
+
+      - name: Create a signing key (once)
+        run: |
+          KS=signing/perchance.jks
+          if [ ! -f "$KS" ]; then
+            mkdir -p signing
+            keytool -genkeypair -keystore "$KS" -storetype JKS -alias perchance \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -storepass perchance-key -keypass perchance-key \
+              -dname "CN=Perchance, O=Perchance, C=US"
+          fi
+          {
+            echo "PERCHANCE_KEYSTORE=$PWD/$KS"
+            echo "PERCHANCE_KEYSTORE_PASSWORD=perchance-key"
+            echo "PERCHANCE_KEY_ALIAS=perchance"
+            echo "PERCHANCE_KEY_PASSWORD=perchance-key"
+          } >> "$GITHUB_ENV"
+
+      - name: Keep the source and the key in this repo
+        run: |
+          git config user.name "perchance-build-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git add -f signing/perchance.jks
+          if ! git diff --cached --quiet; then
+            git commit -m "Sync app source and signing key [skip ci]"
+            git push
+          fi
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+
+      - name: Collect APKs
+        run: |
+          mkdir -p artifacts
+          find app/build/outputs/apk -name '*.apk' | while read -r f; do
+            case "$f" in
+              *debug*) cp "$f" artifacts/Perchance-debug.apk ;;
+              *release*) cp "$f" artifacts/Perchance.apk ;;
+            esac
+          done
+          ls -lh artifacts
+
+      - name: Upload APKs as build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: perchance-apk
+          path: artifacts/*.apk
+          if-no-files-found: error
+
+      - name: Publish an installable APK in Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/*.apk --clobber
+          else
+            gh release create "$TAG" \
+              --title "Perchance app build ${{ github.run_number }}" \
+              --notes "Tap Perchance.apk to download it, then open it on your phone to install. Perchance-debug.apk is the same app with WebView debugging enabled." \
+              artifacts/*.apk
+          fi
