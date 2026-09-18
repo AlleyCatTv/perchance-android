@@ -1,3 +1,10 @@
+# ---------------------------------------------------------------------------
+# BUILD PERCHANCE APK - GitHub Actions workflow
+#
+# Paste ALL of this text into .github/workflows/build-apk.yml, replacing
+# everything that is there now, then commit. The app download link is already
+# built in, so there is nothing else to edit.
+# ---------------------------------------------------------------------------
 name: Build Perchance APK
 
 # Builds an installable APK on GitHub's runners. Nothing needs to be installed
@@ -5,16 +12,19 @@ name: Build Perchance APK
 #
 # Quick start: create an empty repository, add this file at
 # .github/workflows/build-apk.yml, and commit. That starts a build.
+#
+# The app source is downloaded fresh from the link in PROJECT_ZIP_URL on every
+# run (falling back to the copy committed in this repo if that download fails),
+# so a run can never use a stale copy.
+#
+# If the build fails, the whole build output is saved to build-logs/latest.txt
+# in this same repository, so the error can be read without opening the log on
+# a phone.
 
 on:
   push:
     branches: [main, master]
   workflow_dispatch:
-    inputs:
-      resync_source:
-        description: Re-download the app source before building
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -25,12 +35,12 @@ env:
   # straight in here. Ignored once the source is committed in the repo.
   # Accepts: the project zip, a repository archive (.zip/.tar.gz, optionally
   # with a query string), or a git clone URL (https://github.com/you/repo.git).
-  PROJECT_ZIP_URL: "https://user.uploads.dev/file/01c619bfe5768c86065d162aa9949502.zip"
+  PROJECT_ZIP_URL: "https://user.uploads.dev/file/423a3f1a448a47ba255bddacb70b20b7.zip"
 
 jobs:
   build:
     name: Assemble installable APKs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -78,32 +88,38 @@ jobs:
 
       - name: Get the app source
         run: |
-          if [ ! -f ./gradlew ] || [ "${{ inputs.resync_source }}" = "true" ]; then
-            URL="$PROJECT_ZIP_URL"
-            if [ -z "$URL" ]; then
-              echo "::error::No app source in this repo and PROJECT_ZIP_URL is empty. Set it to the project zip, a repo archive link, or a git clone URL."
+          URL="$PROJECT_ZIP_URL"
+          if [ -z "$URL" ]; then
+            if [ ! -f ./gradlew ]; then
+              echo "::error::This repository has no app source and PROJECT_ZIP_URL is empty."
               exit 1
             fi
+            echo "No download link set - using the copy of the app source already in this repository."
+          else
             SRC=/tmp/perchance-src
             rm -rf "$SRC"
             mkdir -p "$SRC"
+            OK=1
             case "$URL" in
               *.git|git@*|ssh://*|git+*)
                 echo "Cloning $URL"
-                git clone --depth 1 "${URL#git+}" "$SRC" ;;
+                git clone --depth 1 "${URL#git+}" "$SRC" || OK=0 ;;
               *)
                 echo "Downloading $URL"
-                curl -fsSL -o /tmp/perchance-download "$URL"
-                if tar -tf /tmp/perchance-download > /dev/null 2>&1; then
-                  tar -xaf /tmp/perchance-download -C "$SRC"
+                if curl -fsSL -o /tmp/perchance-download "$URL"; then
+                  if tar -tf /tmp/perchance-download > /dev/null 2>&1; then
+                    tar -xaf /tmp/perchance-download -C "$SRC"
+                  else
+                    unzip -q -o /tmp/perchance-download -d "$SRC"
+                  fi
                 else
-                  unzip -q -o /tmp/perchance-download -d "$SRC"
+                  OK=0
                 fi ;;
             esac
             # A repository archive (github.com/<user>/<repo>/archive/refs/heads/main.zip,
             # codeload, GitLab/Bitbucket download links) wraps everything in one
             # top-level "<repo>-<branch>/" folder - flatten it.
-            if [ ! -f "$SRC/gradlew" ]; then
+            if [ "$OK" = "1" ] && [ ! -f "$SRC/gradlew" ]; then
               INNER=""
               for d in "$SRC"/*/; do INNER="${d%/}"; break; done
               if [ -n "$INNER" ] && [ -f "$INNER/gradlew" ]; then
@@ -113,21 +129,27 @@ jobs:
                 shopt -u dotglob
               fi
             fi
-            if [ ! -f "$SRC/gradlew" ]; then
-              echo "::error::No app source (gradlew) found at $URL. Use the project zip, a repo archive link, or a git clone URL."
-              ls -la "$SRC"
-              exit 1
+            if [ "$OK" != "1" ] || [ ! -f "$SRC/gradlew" ]; then
+              if [ ! -f ./gradlew ]; then
+                echo "::error::Could not get the app source from $URL."
+                ls -la "$SRC"
+                exit 1
+              fi
+              echo "::warning::Could not download the app source - keeping the copy that is already in this repository."
+            else
+              # Never replace a signing key that already lives in this repo.
+              if [ -f signing/perchance.jks ]; then rm -rf "$SRC/signing"; fi
+              # Keep this workflow file instead of the copy shipped with the source.
+              mkdir -p "$SRC/.github/workflows"
+              cp .github/workflows/build-apk.yml "$SRC/.github/workflows/build-apk.yml"
+              rm -rf "$SRC/.git"
+              shopt -s dotglob
+              cp -R "$SRC"/. .
+              shopt -u dotglob
             fi
-            # Never replace a signing key that already lives in this repo.
-            if [ -f signing/perchance.jks ]; then rm -rf "$SRC/signing"; fi
-            # Keep this workflow file instead of the copy shipped with the source.
-            mkdir -p "$SRC/.github/workflows"
-            cp .github/workflows/build-apk.yml "$SRC/.github/workflows/build-apk.yml"
-            rm -rf "$SRC/.git"
-            shopt -s dotglob
-            cp -R "$SRC"/. .
-            shopt -u dotglob
           fi
+          chmod +x ./gradlew
+          ls -la
           chmod +x ./gradlew
           ls -la
 
@@ -165,9 +187,61 @@ jobs:
       - name: Build
         run: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+          set +e
+          ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --console=plain > /tmp/build.log 2>&1
+          STATUS=$?
+          set -e
+          echo "BUILD_STATUS=$STATUS" >> "$GITHUB_ENV"
+          echo "gradle exit status: $STATUS"
+          echo "----- errors and explanation from the build output -----"
+          grep -n -E "^(e: |error: |FAILURE|\* What went wrong|\* Where|\* Try|Caused by:|> )" /tmp/build.log 2>/dev/null | head -n 60 || true
+          echo "----- last 40 lines -----"
+          tail -n 40 /tmp/build.log || true
+          echo "--------------------------------------------------------"
+
+      - name: Save the build log in this repo
+        if: always()
+        run: |
+          mkdir -p build-logs
+          {
+            echo "Build Perchance APK - run ${GITHUB_RUN_NUMBER} (${GITHUB_RUN_ID})"
+            echo "commit: ${GITHUB_SHA}"
+            echo "when: $(date -u +%FT%TZ)"
+            echo "gradle exit status: ${BUILD_STATUS:-unknown}"
+            echo "java: $(java -version 2>&1 | head -n 1)"
+            echo "runner: ${ImageOS:-unknown}"
+            echo
+            echo "===== wrapper ====="
+            cat gradle/wrapper/gradle-wrapper.properties 2>/dev/null || true
+            echo
+            echo "===== error lines ====="
+            grep -n -E "^(e: |error: |FAILURE|\\* What went wrong|\\* Where|\\* Try|Caused by:|> )" /tmp/build.log 2>/dev/null | head -n 200 || true
+            echo
+            echo "===== last 400 lines of the build output ====="
+            tail -n 400 /tmp/build.log 2>/dev/null || true
+          } > build-logs/latest.txt
+          cp build-logs/latest.txt "build-logs/run-${GITHUB_RUN_NUMBER}.txt" 2>/dev/null || true
+          wc -l build-logs/latest.txt
+          git config user.name "perchance-build-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f build-logs
+          if ! git diff --cached --quiet; then
+            git commit -m "Record the build log for run ${GITHUB_RUN_NUMBER} [skip ci]"
+            git push || true
+          fi
+
+      - name: Report the result
+        if: always()
+        run: |
+          if [ "${BUILD_STATUS:-1}" = "0" ]; then
+            echo "::notice::The APKs built successfully."
+          else
+            echo "::error::Gradle failed with exit status ${BUILD_STATUS:-unknown}. The complete build output was saved to build-logs/latest.txt in this repository."
+            exit 1
+          fi
 
       - name: Collect APKs
+        if: env.BUILD_STATUS == '0'
         run: |
           mkdir -p artifacts
           find app/build/outputs/apk -name '*.apk' | while read -r f; do
@@ -179,6 +253,7 @@ jobs:
           ls -lh artifacts
 
       - name: Upload APKs as build artifacts
+        if: env.BUILD_STATUS == '0'
         uses: actions/upload-artifact@v4
         with:
           name: perchance-apk
@@ -186,6 +261,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish an installable APK in Releases
+        if: env.BUILD_STATUS == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
